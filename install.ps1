@@ -74,22 +74,19 @@ if ($ClaudeDesktop) {
     if (-not (Test-Path $desktopDir)) {
         New-Item -ItemType Directory -Path $desktopDir -Force | Out-Null
     }
-    $cfg = @{}
-    if (Test-Path $desktopCfgPath) {
-        try {
-            $cfg = Get-Content $desktopCfgPath -Raw | ConvertFrom-Json -AsHashtable
-        } catch {
-            $cfg = @{}
-        }
+    $cfg = if (Test-Path $desktopCfgPath) {
+        Get-Content $desktopCfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    } else {
+        [pscustomobject]@{}
     }
-    if (-not $cfg.ContainsKey("mcpServers")) {
-        $cfg["mcpServers"] = @{}
+    if (-not $cfg.PSObject.Properties["mcpServers"]) {
+        $cfg | Add-Member mcpServers ([pscustomobject]@{})
     }
-    $cfg["mcpServers"]["outlook"] = @{
+    $cfg.mcpServers | Add-Member outlook ([pscustomobject]@{
         command = $Python
         args = @($entryPoint)
-    }
-    $cfg | ConvertTo-Json -Depth 10 | Set-Content $desktopCfgPath -Encoding utf8
+    }) -Force
+    [IO.File]::WriteAllText($desktopCfgPath, ($cfg | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
     Write-Host "Updated Claude Desktop config successfully." -ForegroundColor Green
 }
 
