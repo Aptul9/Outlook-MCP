@@ -46,7 +46,7 @@ Write-Host "Copied server files to $InstallDir" -ForegroundColor Green
 Write-Host "Verifying server and token harvest..." -ForegroundColor Cyan
 & $Python $entryPoint --call list_accounts
 if ($LASTEXITCODE -ne 0) {
-    Write-Warning "Initial account check returned non-zero exit code. Make sure New Outlook is logged in."
+    Write-Error "Account check failed with exit code $LASTEXITCODE. See the Python error above; the server was not registered."
 }
 
 # 4. Register with Claude Code CLI if available
