@@ -274,9 +274,10 @@ def search_emails(account: str = None, query: str = None, limit: int = 25) -> li
     """Full-text search across all messages."""
     if not query:
         raise ValueError('query is required')
+    quoted_query = urllib.parse.quote(f'"{query}"')
     params = [
         f'$top={max(1, min(limit, 100))}',
-        f'$search={urllib.parse.quote(f"\"{query}\"")}',
+        f'$search={quoted_query}',
         '$select=Id,Subject,From,Sender,ToRecipients,ReceivedDateTime,CreatedDateTime,BodyPreview,HasAttachments,IsRead,ConversationId'
     ]
     path = f"me/messages?{'&'.join(params)}"
