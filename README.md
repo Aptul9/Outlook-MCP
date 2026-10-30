@@ -107,3 +107,26 @@ python outlook_mcp.py --call search_emails "{'query': 'deploy'}"
 - **Liste e Tabelle**: tag HTML standard `<ul>`, `<li>`, `<table>`
 - **Allegati**: lista di percorsi locali in `attachments` codificati in Base64 via `#Microsoft.OutlookServices.FileAttachment`.
 
+---
+
+## Replying with Cc, Bcc & Attachments
+
+With `reply_to_id` set, `to`, `cc`, `bcc` and `attachments` all apply to the reply:
+
+```json
+{
+  "account": "prismaprogetti",
+  "reply_to_id": "<message_id>",
+  "cc": ["first@example.com", "second@example.com"],
+  "body": "Reply text"
+}
+```
+
+- A reply carrying any of those fields goes through `createreply` / `createreplyall`, a `PATCH` on the draft, then `send`. The draft is deleted if a step fails. A plain reply uses the direct `reply` / `replyall` action.
+- `cc` and `bcc` are added to the recipients of the reply, duplicates skipped.
+- `to` replaces the default recipient. It is required to reply to your own sent message: without it, the reply goes back to you.
+- The tool result lists the final To, Cc and Bcc.
+- `is_html` has no effect on replies: `body` is sent as the reply comment.
+
+After changing the code, run `install.ps1` and restart the MCP client: a running server keeps the code it started with.
+
