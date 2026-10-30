@@ -284,6 +284,62 @@ def search_emails(account: str = None, query: str = None, limit: int = 25) -> li
     return res.get('value', [])
 
 
+def _attachment_objects(attachments: list) -> list:
+    """Build FileAttachment objects from local file paths."""
+    att_objs = []
+    for att in attachments or []:
+        if isinstance(att, str) and os.path.isfile(att):
+            with open(att, 'rb') as fp:
+                content_b64 = base64.b64encode(fp.read()).decode('ascii')
+            att_objs.append({
+                '@odata.type': '#Microsoft.OutlookServices.FileAttachment',
+                'Name': os.path.basename(att),
+                'ContentBytes': content_b64
+            })
+    return att_objs
+
+
+def _merge_recipients(existing: list, extra: list) -> list:
+    """Append extra recipients to existing ones, skipping duplicate addresses."""
+    merged = list(existing or [])
+    seen = {r['EmailAddress']['Address'].lower() for r in merged}
+    for r in extra:
+        addr = r['EmailAddress']['Address'].lower()
+        if addr not in seen:
+            seen.add(addr)
+            merged.append(r)
+    return merged
+
+
+def _send_reply_draft(account, reply_to_id, body, reply_all, to, cc, bcc, attachments) -> dict:
+    """Reply through a draft: the reply action takes no recipients, a draft does."""
+    create = 'createreplyall' if reply_all else 'createreply'
+    path = f"me/messages/{urllib.parse.quote(reply_to_id)}/{create}"
+    draft = _request(account, path, method='POST', data={'Comment': body})
+    draft_path = f"me/messages/{urllib.parse.quote(draft['Id'])}"
+
+    to_recipients = parse_recipients(to) or draft.get('ToRecipients', [])
+    cc_recipients = _merge_recipients(draft.get('CcRecipients'), parse_recipients(cc))
+    bcc_recipients = _merge_recipients(draft.get('BccRecipients'), parse_recipients(bcc))
+
+    try:
+        _request(account, draft_path, method='PATCH', data={
+            'ToRecipients': to_recipients,
+            'CcRecipients': cc_recipients,
+            'BccRecipients': bcc_recipients
+        })
+        for att in _attachment_objects(attachments):
+            _request(account, f"{draft_path}/attachments", method='POST', data=att)
+        _request(account, f"{draft_path}/send", method='POST')
+    except Exception:
+        _request(account, draft_path, method='DELETE')
+        raise
+
+    addr = lambda rs: [r['EmailAddress']['Address'] for r in rs]
+    return {'status': 'sent', 'type': create, 'target_message_id': reply_to_id,
+            'to': addr(to_recipients), 'cc': addr(cc_recipients), 'bcc': addr(bcc_recipients)}
+
+
 def send_email(account: str = None, to: list = None, subject: str = '', body: str = '',
                cc: list = None, bcc: list = None, is_html: bool = False,
                reply_to_id: str = None, reply_all: bool = False,
@@ -292,6 +348,8 @@ def send_email(account: str = None, to: list = None, subject: str = '', body: st
     if reply_to_id:
         # Reply mode
         method = 'replyall' if reply_all else 'reply'
+        if to or cc or bcc or attachments:
+            return _send_reply_draft(account, reply_to_id, body, reply_all, to, cc, bcc, attachments)
         payload = {
             'Comment': body
         }
@@ -319,19 +377,9 @@ def send_email(account: str = None, to: list = None, subject: str = '', body: st
     if bcc_recipients:
         message['BccRecipients'] = bcc_recipients
 
-    if attachments:
-        att_objs = []
-        for att in attachments:
-            if isinstance(att, str) and os.path.isfile(att):
-                with open(att, 'rb') as fp:
-                    content_b64 = base64.b64encode(fp.read()).decode('ascii')
-                att_objs.append({
-                    '@odata.type': '#Microsoft.OutlookServices.FileAttachment',
-                    'Name': os.path.basename(att),
-                    'ContentBytes': content_b64
-                })
-        if att_objs:
-            message['Attachments'] = att_objs
+    att_objs = _attachment_objects(attachments)
+    if att_objs:
+        message['Attachments'] = att_objs
 
     payload = {
         'Message': message,

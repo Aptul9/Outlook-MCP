@@ -227,8 +227,10 @@ def tool_send_email(args):
     if reply_to_id:
         if not body.strip():
             return "body comment is required when replying"
-        res = api.send_email(account=account, body=body, reply_to_id=reply_to_id, reply_all=reply_all)
-        return f"Reply successfully sent to message {reply_to_id} ({'reply all' if reply_all else 'single reply'})."
+        res = api.send_email(account=account, to=to, body=body, cc=cc, bcc=bcc, reply_to_id=reply_to_id,
+                             reply_all=reply_all, attachments=attachments)
+        sent = f" To: {res['to']}. Cc: {res['cc']}. Bcc: {res['bcc']}." if 'to' in res else ''
+        return f"Reply successfully sent to message {reply_to_id} ({'reply all' if reply_all else 'single reply'}).{sent}"
     
     if not to:
         return "'to' recipient is required for sending new email"
@@ -307,7 +309,7 @@ TOOLS = [
         'description': 'Send a new email or reply to an existing email / conversation thread.',
         'inputSchema': {'type': 'object', 'properties': {
             'account': ACCOUNT_ARG,
-            'to': {'description': 'Recipient email address or list of addresses (required if not replying).', 'type': ['string', 'array']},
+            'to': {'description': 'Recipient email address or list of addresses (required if not replying; when replying, replaces the default reply recipient).', 'type': ['string', 'array']},
             'subject': {'type': 'string', 'description': 'Subject of the email.'},
             'body': {'type': 'string', 'description': 'Text or HTML body content.'},
             'cc': {'description': 'CC recipient(s).', 'type': ['string', 'array']},
