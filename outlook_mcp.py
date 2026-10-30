@@ -4,6 +4,7 @@ Standard library only, zero external Python packages.
 Harvests decrypted tokens straight from IdentityCache / OneAuth via Windows DPAPI.
 No elevation required, no app restarts, runs transparently.
 """
+import base64
 import datetime as dt
 import html
 import json
@@ -22,6 +23,8 @@ import outlook_tokens as tokens
 
 PROTOCOL_VERSION = '2025-06-18'
 SERVER_VERSION = '1.0.0'
+
+DOWNLOAD_DIR = os.path.join(os.environ.get('LOCALAPPDATA', '.'), 'OutlookMCP', 'downloads')
 
 # ---------------------------------------------------------------- Formatting helpers
 
@@ -244,6 +247,78 @@ def tool_send_email(args):
     return f"Email '{subject}' successfully sent from {info['upn']} to [{to_str}]."
 
 
+def _field(obj, name):
+    """Read a field case-insensitively (Outlook REST is PascalCase, Graph camelCase)."""
+    if name in obj:
+        return obj[name]
+    cam = name[0].lower() + name[1:]
+    if cam in obj:
+        return obj[cam]
+    lower = name.lower()
+    for k, v in obj.items():
+        if k.lower() == lower:
+            return v
+    return None
+
+
+def _safe_filename(name, fallback):
+    name = (name or fallback).strip()
+    name = re.sub(r'[\\/:*?"<>|\r\n\t]', '_', name)
+    name = name.strip('. ') or fallback
+    return name[:150]
+
+
+def tool_get_attachment(args):
+    account = args.get('account')
+    message_id = args.get('message_id')
+    if not message_id:
+        return 'message_id is required'
+    atts = api.list_attachments(account=account, message_id=message_id)
+    if not atts:
+        return f'No attachments on message {message_id}.'
+    att_id = args.get('attachment_id')
+    idx = args.get('index')
+    if att_id:
+        picked = [(i, a) for i, a in enumerate(atts, 1) if _field(a, 'Id') == att_id]
+        if not picked:
+            return f'attachment_id not found on message {message_id}; it has {len(atts)} attachment(s).'
+    elif idx is not None:
+        i = int(idx)
+        if not 1 <= i <= len(atts):
+            return f'index {i} out of range: message {message_id} has {len(atts)} attachment(s).'
+        picked = [(i, atts[i - 1])]
+    else:
+        picked = list(enumerate(atts, 1))
+
+    save_dir = args.get('save_dir') or DOWNLOAD_DIR
+    os.makedirs(save_dir, exist_ok=True)
+    blocks, lines = [], [f'{len(atts)} attachment(s) on message {message_id}:']
+    for n, meta in picked:
+        full = api.get_attachment(account=account, message_id=message_id, attachment_id=_field(meta, 'Id'))
+        otype = (full.get('@odata.type') or '').lower()
+        name = _field(full, 'Name') or _field(meta, 'Name') or f'attachment-{n}'
+        mime = (_field(full, 'ContentType') or _field(meta, 'ContentType') or 'application/octet-stream').split(';')[0].strip()
+        if 'itemattachment' in otype:
+            lines.append(f'  #{n} "{name}": embedded Outlook item (email/event), not a downloadable file. Open it in Outlook.')
+            continue
+        if 'referenceattachment' in otype:
+            url = _field(full, 'SourceUrl') or ''
+            lines.append(f'  #{n} "{name}": link to a cloud file (OneDrive/SharePoint), no bytes on the message. {url}'.rstrip())
+            continue
+        content_b64 = _field(full, 'ContentBytes')
+        if not content_b64:
+            lines.append(f'  #{n} "{name}": no content bytes returned (type {otype or "unknown"}).')
+            continue
+        data = base64.b64decode(content_b64)
+        path = os.path.join(save_dir, _safe_filename(name, f'attachment-{n}'))
+        with open(path, 'wb') as fh:
+            fh.write(data)
+        lines.append(f'  #{n} "{name}" saved: {path} ({len(data) / 1024:.0f} KB, {mime})')
+        if mime.startswith('image/'):
+            blocks.append({'type': 'image', 'data': content_b64, 'mimeType': mime})
+    return [{'type': 'text', 'text': '\n'.join(lines)}] + blocks
+
+
 # ---------------------------------------------------------------- Tool Registry
 
 ACCOUNT_ARG = {'type': 'string', 'description': 'Filter or select by account email (e.g. part of address). If omitted, uses default account.'}
@@ -320,6 +395,18 @@ TOOLS = [
             'attachments': {'type': 'array', 'items': {'type': 'string'}, 'description': 'List of local file paths to attach to the email.'}
         }},
         'fn': tool_send_email
+    },
+    {
+        'name': 'get_attachment',
+        'description': 'Download the attachment(s) of one email and return any images inline so they can be viewed. Pass the message_id (from list_emails/read_email/search_emails) and optionally an attachment_id or 1-based index; all attachments are fetched when neither is given. Files are saved to disk; images are also returned inline. Embedded Outlook items and OneDrive/SharePoint links are reported but not downloaded.',
+        'inputSchema': {'type': 'object', 'required': ['message_id'], 'properties': {
+            'message_id': {'type': 'string', 'description': 'The message ID holding the attachment(s).'},
+            'attachment_id': {'type': 'string', 'description': 'Attachment Id (from the attachments list in read_email). Optional.'},
+            'index': {'type': 'integer', 'description': 'Which attachment to fetch, 1-based. Optional: all are fetched when omitted.'},
+            'save_dir': {'type': 'string', 'description': 'Folder to save into. Optional, defaults to %LOCALAPPDATA%\\OutlookMCP\\downloads.'},
+            'account': ACCOUNT_ARG
+        }},
+        'fn': tool_get_attachment
     }
 ]
 
@@ -360,8 +447,9 @@ def handle(req):
             reply(msg_id, error={'code': -32602, 'message': f'unknown tool {tool_name}'})
             return
         try:
-            res_text = tool['fn'](p.get('arguments') or {})
-            reply(msg_id, {'content': [{'type': 'text', 'text': res_text}]})
+            res = tool['fn'](p.get('arguments') or {})
+            content = res if isinstance(res, list) else [{'type': 'text', 'text': res}]
+            reply(msg_id, {'content': content})
         except Exception as e:
             reply(msg_id, {'content': [{'type': 'text', 'text': f'Error: {type(e).__name__}: {e}'}], 'isError': True})
     else:
@@ -388,7 +476,13 @@ def main():
                 args = ast.literal_eval(raw_arg)
             except Exception:
                 args = {}
-        print(tool['fn'](args))
+        res = tool['fn'](args)
+        if isinstance(res, list):
+            for b in res:
+                print(b['text'] if b.get('type') == 'text'
+                      else '[%s %s, %d B base64]' % (b.get('type'), b.get('mimeType'), len(b.get('data') or '')))
+        else:
+            print(res)
         return
         
     for line in sys.stdin:
