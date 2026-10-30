@@ -20,6 +20,7 @@ Reads emails, navigates entire conversation threads, searches messages, lists fo
 | `read_thread` | **Reads an entire conversation thread** in chronological order (oldest to newest) with full Markdown bodies and attachments list | `thread_id` (or any `message_id`), `limit`, `account` |
 | `search_emails` | Full-text search across all folders | `query`, `limit`, `account` |
 | `send_email` | Send a new email or post a reply to a thread/message | `to`, `subject`, `body`, `cc`, `bcc`, `reply_to_id`, `reply_all`, `attachments`, `account` |
+| `get_attachment` | Download the attachment(s) of one email to disk and return any images inline for viewing | `message_id`, `attachment_id`, `index`, `save_dir`, `account` |
 
 ---
 
@@ -78,6 +79,7 @@ python outlook_mcp.py --call list_accounts
 python outlook_mcp.py --call list_emails "{'limit': 5}"
 python outlook_mcp.py --call read_thread "{'thread_id': '<thread_or_message_id>'}"
 python outlook_mcp.py --call search_emails "{'query': 'deploy'}"
+python outlook_mcp.py --call get_attachment "{'message_id': '<message_id>'}"
 ```
 
 ---
@@ -127,6 +129,24 @@ With `reply_to_id` set, `to`, `cc`, `bcc` and `attachments` all apply to the rep
 - `to` replaces the default recipient. It is required to reply to your own sent message: without it, the reply goes back to you.
 - The tool result lists the final To, Cc and Bcc.
 - `is_html` has no effect on replies: `body` is sent as the reply comment.
+
+---
+
+## Downloading Attachments
+
+`get_attachment` fetches the attachment bytes of one email over the Outlook REST / Graph API and writes them to disk.
+
+```json
+{
+  "message_id": "<message_id from list_emails/read_email>",
+  "index": 1
+}
+```
+
+- `message_id` is required. Without `attachment_id` or `index`, every attachment on the message is fetched; `attachment_id` (the `Id` shown in `read_email`'s attachments list) or a 1-based `index` selects one.
+- Files are saved to `save_dir`, which defaults to `%LOCALAPPDATA%\OutlookMCP\downloads`.
+- Image attachments (inline signature images included) are also returned inline as MCP image blocks, so the client can display them.
+- A `FileAttachment` is downloaded through its Base64 `ContentBytes`. An embedded Outlook item (`ItemAttachment`, e.g. a forwarded email) and a cloud link (`ReferenceAttachment`, OneDrive/SharePoint) carry no file bytes on the message: they are reported, not downloaded.
 
 After changing the code, run `install.ps1` and restart the MCP client: a running server keeps the code it started with.
 

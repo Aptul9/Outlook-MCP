@@ -284,6 +284,29 @@ def search_emails(account: str = None, query: str = None, limit: int = 25) -> li
     return res.get('value', [])
 
 
+def list_attachments(account: str = None, message_id: str = None) -> list:
+    """List attachment metadata (no content bytes) for one message."""
+    if not message_id:
+        raise ValueError('message_id is required')
+    path = f"me/messages/{urllib.parse.quote(message_id)}/attachments?$select=Id,Name,ContentType,Size,IsInline"
+    res = _request(account, path)
+    return res.get('value', [])
+
+
+def get_attachment(account: str = None, message_id: str = None, attachment_id: str = None) -> dict:
+    """Fetch one attachment in full, including ContentBytes (base64) for a FileAttachment.
+
+    For an itemAttachment (embedded email/event) or a referenceAttachment (cloud link)
+    no file bytes are returned; the caller inspects @odata.type.
+    """
+    if not message_id:
+        raise ValueError('message_id is required')
+    if not attachment_id:
+        raise ValueError('attachment_id is required')
+    path = f"me/messages/{urllib.parse.quote(message_id)}/attachments/{urllib.parse.quote(attachment_id)}"
+    return _request(account, path)
+
+
 def _attachment_objects(attachments: list) -> list:
     """Build FileAttachment objects from local file paths."""
     att_objs = []
