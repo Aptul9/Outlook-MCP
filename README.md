@@ -1,11 +1,14 @@
 # Outlook MCP
 
-Full-featured MCP (Model Context Protocol) server for **New Outlook** (`olk.exe` / `Microsoft.OutlookForWindows`).
+Full-featured MCP (Model Context Protocol) server for **OE Copilot** (virtual Android phone on remote server) and **New Outlook** (`olk.exe` / `Microsoft.OutlookForWindows`).
 
-Reads emails, navigates entire conversation threads, searches messages, lists folders/accounts, and sends emails or thread replies. Works transparently across **all signed-in Microsoft 365 / Exchange accounts** on your PC.
+Reads emails, navigates entire conversation threads, searches messages, downloads and expands attachments (including embedded Outlook emails), manages folders/flags/read status, and sends, replies to, or forwards emails with rich HTML formatting, selective recipients, multiple CC/BCC, and binary attachments.
 
-**Zero third-party Python dependencies** (standard library only: `ctypes`, `urllib`, `sqlite3`, `json`).
-**Zero app restarts**: harvests fresh OAuth2 bearer tokens directly from the Windows DPAPI-protected identity token cache (`%LOCALAPPDATA%\Microsoft\IdentityCache`), without touching or closing New Outlook.
+- **Zero third-party Python dependencies on Windows** (standard library only: `ctypes`, `urllib`, `sqlite3`, `subprocess`, `json`).
+- **Dual token harvester (`outlook_tokens.py`)**:
+  1. **OE Copilot (`oecopilot-vm`)**: harvests and decrypts `HxCoreSecureStringAES256Gcm` tokens from `acompliAcct.db` and Android Keystore `persistent.sqlite` on the virtual phone over SSH (`OUTLOOK_MCP_SSH_HOST`, default `oecopilot-vm`), plus phone sync status from `stato/accessi.json`.
+  2. **Local New Outlook (`IdentityCache`)**: harvests tokens from `%LOCALAPPDATA%\Microsoft\IdentityCache` via Windows DPAPI.
+  - Tokens are cached locally in `%LOCALAPPDATA%\OutlookMCP\tokens.bin` protected by Windows DPAPI.
 
 ---
 
@@ -13,140 +16,48 @@ Reads emails, navigates entire conversation threads, searches messages, lists fo
 
 | Tool | Description | Key Arguments |
 |---|---|---|
-| `list_accounts` | Lists all detected Outlook accounts and token status | None |
-| `list_folders` | Lists mail folders (Inbox, Sent, Archive, etc.) with total & unread counts | `account` |
-| `list_emails` | Lists messages newest first with IDs, thread ID, sender, subject, preview | `folder`, `query`, `limit`, `unread_only`, `account` |
-| `read_email` | Reads one email completely: headers, clean Markdown body, attachments list | `message_id`, `account` |
-| `read_thread` | **Reads an entire conversation thread** in chronological order (oldest to newest) with full Markdown bodies and attachments list | `thread_id` (or any `message_id`), `limit`, `account` |
-| `search_emails` | Full-text search across all folders | `query`, `limit`, `account` |
-| `send_email` | Send a new email or post a reply to a thread/message | `to`, `subject`, `body`, `cc`, `bcc`, `reply_to_id`, `reply_all`, `attachments`, `account` |
-| `get_attachment` | Download the attachment(s) of one email to disk and return any images inline for viewing | `message_id`, `attachment_id`, `index`, `save_dir`, `account` |
-
----
-
-## Requirements
-
-- Windows 10 or 11
-- New Microsoft Outlook (`olk.exe`), signed in to at least one account.
-- Python 3.8 or later.
+| `list_accounts` | Lists all detected Outlook accounts (OE Copilot + local), token expiry, and phone sync status | None |
+| `list_folders` | Lists mail folders (including nested child folders) with total and unread counts | `account`, `include_child_folders` |
+| `list_emails` | Lists messages newest first with IDs, thread ID, From, To, Cc, subject, preview | `folder`, `query`, `from_address`, `unread_only`, `has_attachments`, `flagged_only`, `start_date`, `end_date`, `limit`, `account` |
+| `read_email` | Reads one email completely: headers, clean Markdown body (including tables), attachments list | `message_id`, `account` |
+| `read_thread` | **Reads an entire conversation thread** in chronological order (oldest to newest) with participants list, full Markdown bodies, and attachments | `thread_id` (or any `message_id`), `limit`, `account` |
+| `search_emails` | Full-text search across all folders (or a specific folder) with sender, date, unread, and attachment filters | `query`, `from_address`, `folder`, `unread_only`, `has_attachments`, `start_date`, `end_date`, `limit`, `account` |
+| `send_email` | Send a new email, reply/reply-all/selective-reply to a thread, forward an email, or save as draft | `to`, `subject`, `body`, `cc`, `bcc`, `is_html`, `reply_to_id`, `reply_all`, `replace_cc`, `exclude_recipients`, `forward_to_id`, `attachments`, `importance`, `save_as_draft`, `account` |
+| `forward_email` | Forward an existing email preserving original server-side attachments and quoted history | `message_id`, `to`, `body`, `cc`, `bcc`, `subject`, `is_html`, `attachments`, `save_as_draft`, `account` |
+| `get_attachment` | Download attachment(s) to disk, return images inline, and expand embedded Outlook emails (`ItemAttachment`) into Markdown | `message_id`, `attachment_id`, `index`, `save_dir`, `account` |
+| `manage_email` | Mark read/unread, flag/unflag, archive, delete, or move message(s) to a folder | `message_id` (string or list), `action`, `destination_folder`, `account` |
 
 ---
 
 ## Install
 
-Run the installer via PowerShell:
-
 ```powershell
 cd C:\Users\Samuele\Downloads\outlook-mcp
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
-```
-
-The script will:
-1. Copy the server files to `%LOCALAPPDATA%\Programs\OutlookMCP\`
-2. Verify token harvesting across your accounts
-3. Register the server in Claude Code CLI as `outlook`: `claude mcp add --scope user outlook -- <python> <server>`
-
-To also register in Claude Desktop:
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -ClaudeDesktop
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -NoClaudeCode
 ```
 
 ---
 
-## Configuration for Other MCP Clients
+## Replying with Rich HTML, Multiple CC, and Selective Recipients
+
+`send_email` supports full rich HTML (`is_html: true` or auto-detected HTML tags) on **both new emails and replies/forwards**, as well as complete recipient control on replies:
 
 ```json
 {
-  "mcpServers": {
-    "outlook": {
-      "command": "python",
-      "args": [
-        "C:\\Users\\<YourUser>\\AppData\\Local\\Programs\\OutlookMCP\\outlook_mcp.py"
-      ]
-    }
-  }
-}
-```
-
----
-
-## Verification & Manual Testing
-
-Run any tool directly from the terminal without starting an MCP client:
-
-```powershell
-python outlook_mcp.py --call list_accounts
-python outlook_mcp.py --call list_emails "{'limit': 5}"
-python outlook_mcp.py --call read_thread "{'thread_id': '<thread_or_message_id>'}"
-python outlook_mcp.py --call search_emails "{'query': 'deploy'}"
-python outlook_mcp.py --call get_attachment "{'message_id': '<message_id>'}"
-```
-
----
-
-## Sending Emails with Rich Formatting & Attachments
-
-`send_email` supports full HTML formatting and arbitrary binary attachments.
-
-### Example JSON invocation
-```json
-{
-  "account": "prismaprogetti",
-  "to": "d.fortunio@prismaprogetti.it",
-  "subject": "[Test] Verifica Outlook MCP - Formattazione HTML ed Allegati",
-  "is_html": true,
-  "body": "<p>Ciao <b>Daniele</b>,</p><p>Badge: <span style=\"background-color:#36b37e;color:white;padding:2px 8px;border-radius:10px;\">TEST SUPERATO</span></p><p><mark style=\"background-color:#fff066;\"><b>Evidenziatore giallo</b></mark></p>",
-  "attachments": [
-    "C:\\Users\\Samuele\\AppData\\Local\\Temp\\opencode\\test_attachment.png"
-  ]
-}
-```
-
-### Supported Styles
-- **Grassetti, corsivi, sottolineati**: `<b>`, `<i>`, `<u>`
-- **Evidenziatori**: `<mark style="background-color: #fff066;">...</mark>` o `<span>` con `background-color`
-- **Badge e Box**: `<div>` o `<span>` con stili CSS inline (bordi, padding, border-radius, colori di sfondo)
-- **Liste e Tabelle**: tag HTML standard `<ul>`, `<li>`, `<table>`
-- **Allegati**: lista di percorsi locali in `attachments` codificati in Base64 via `#Microsoft.OutlookServices.FileAttachment`.
-
----
-
-## Replying with Cc, Bcc & Attachments
-
-With `reply_to_id` set, `to`, `cc`, `bcc` and `attachments` all apply to the reply:
-
-```json
-{
-  "account": "prismaprogetti",
+  "account": "prisma",
   "reply_to_id": "<message_id>",
-  "cc": ["first@example.com", "second@example.com"],
-  "body": "Reply text"
+  "reply_all": true,
+  "to": ["m.svaicari@prismaprogetti.it"],
+  "cc": ["c.ragno@prismaprogetti.it", "d.fortunio@prismaprogetti.it"],
+  "exclude_recipients": ["someone@example.com"],
+  "is_html": true,
+  "body": "<p>Ciao <b>Marco</b>,</p><ul><li>Punto 1</li><li>Punto 2</li></ul>",
+  "attachments": ["C:\\path\\to\\file.pdf"]
 }
 ```
 
-- A reply carrying any of those fields goes through `createreply` / `createreplyall`, a `PATCH` on the draft, then `send`. The draft is deleted if a step fails. A plain reply uses the direct `reply` / `replyall` action.
-- `cc` and `bcc` are added to the recipients of the reply, duplicates skipped.
-- `to` replaces the default recipient. It is required to reply to your own sent message: without it, the reply goes back to you.
-- The tool result lists the final To, Cc and Bcc.
-- `is_html` has no effect on replies: `body` is sent as the reply comment.
-
----
-
-## Downloading Attachments
-
-`get_attachment` fetches the attachment bytes of one email over the Outlook REST / Graph API and writes them to disk.
-
-```json
-{
-  "message_id": "<message_id from list_emails/read_email>",
-  "index": 1
-}
-```
-
-- `message_id` is required. Without `attachment_id` or `index`, every attachment on the message is fetched; `attachment_id` (the `Id` shown in `read_email`'s attachments list) or a 1-based `index` selects one.
-- Files are saved to `save_dir`, which defaults to `%LOCALAPPDATA%\OutlookMCP\downloads`.
-- Image attachments (inline signature images included) are also returned inline as MCP image blocks, so the client can display them.
-- A `FileAttachment` is downloaded through its Base64 `ContentBytes`. An embedded Outlook item (`ItemAttachment`, e.g. a forwarded email) and a cloud link (`ReferenceAttachment`, OneDrive/SharePoint) carry no file bytes on the message: they are reported, not downloaded.
-
-After changing the code, run `install.ps1` and restart the MCP client: a running server keeps the code it started with.
-
+- **Selective reply to specific people**: pass `to` (single address or list) to override `ToRecipients`. With `reply_all: false` (default), only the specified `to` and `cc` recipients receive the reply while keeping the thread (`ConversationId`, `In-Reply-To`, and quoted history) intact.
+- **Reply-all + extra CC**: pass `reply_all: true` and `cc` to keep existing thread CCs and merge additional CC addresses (or pass `replace_cc: true` to replace the CC list).
+- **Exclude specific people on reply-all**: pass `exclude_recipients` to strip specific addresses from `To` and `Cc`.
+- **Rich HTML or plain text**: when `is_html: true` (or when `body` contains HTML tags), rich HTML is inserted directly above the quoted thread. When `is_html: false` (plain text), line breaks (`\n`) are automatically converted to `<br>` so paragraphs are never collapsed.
+- **Draft mode**: pass `save_as_draft: true` to create the message/reply/forward in `Drafts` without sending immediately.
