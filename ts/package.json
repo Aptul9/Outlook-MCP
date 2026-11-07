@@ -1,0 +1,20 @@
+{
+  "name": "outlook-mcp",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Outlook mail and calendar MCP over the OE Copilot token broker",
+  "scripts": {
+    "start": "node src/main.ts",
+    "test": "node --test \"test/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.1.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.2",
+    "typescript": "6.0.3"
+  }
+}

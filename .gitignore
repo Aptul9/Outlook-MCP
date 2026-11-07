@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 tokens.bin*
 *.tmp
+node_modules/
