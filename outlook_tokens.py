@@ -14,6 +14,9 @@ import json
 import os
 import subprocess
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from ctypes import wintypes
 
 CACHE_DIR = os.path.join(os.environ.get('LOCALAPPDATA', '.'), 'OutlookMCP')
@@ -261,6 +264,72 @@ def harvest_remote_tokens(now: float = None) -> dict:
     return accounts
 
 
+# ---------------------------------------------------------------- Authenticated OE Copilot broker
+
+class _NoBrokerRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Never forward the broker credential to a redirect target.
+        return None
+
+
+def harvest_broker_tokens(now: float = None) -> dict:
+    """Read the optional authenticated agent /api/token-posta endpoint.
+
+    Invalid configuration, unavailable brokers and invalid rows fail closed for
+    this source only. Response bodies and credentials are never logged.
+    """
+    url = os.environ.get('OUTLOOK_MCP_BROKER_URL', '')
+    key = os.environ.get('OUTLOOK_MCP_BROKER_KEY', '')
+    if not url or not key:
+        return {}
+    if now is None:
+        now = time.time()
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        if (parsed.scheme not in ('https', 'http') or not parsed.hostname
+                or parsed.username or parsed.password or parsed.query or parsed.fragment):
+            return {}
+        if parsed.scheme == 'http' and parsed.hostname not in ('127.0.0.1', '::1', 'localhost'):
+            return {}
+        req = urllib.request.Request(url, headers={
+            'Authorization': 'Bearer ' + key, 'Accept': 'application/json'
+        })
+        opener = urllib.request.build_opener(_NoBrokerRedirect())
+        with opener.open(req, timeout=10) as response:
+            payload = json.load(response)
+        rows = payload.get('account', [])
+        if not isinstance(rows, list):
+            return {}
+    except urllib.error.HTTPError as error:
+        error.close()
+        return {}
+    except Exception:
+        return {}
+
+    allowed = {u.strip().casefold() for u in
+               os.environ.get('OUTLOOK_MCP_BROKER_ACCOUNTS', '').split(',') if u.strip()}
+    accounts = {}
+    for row in rows:
+        try:
+            if not isinstance(row, dict) or not isinstance(row.get('token'), str):
+                continue
+            info = _classify_token(row['token'], now + 120, source='oe-copilot-broker')
+            if not info or not isinstance(row.get('upn'), str):
+                continue
+            if row['upn'].casefold() != info['upn'].casefold():
+                continue
+            if allowed and info['upn'].casefold() not in allowed:
+                continue
+            # Derive audience, scopes and API base from JWT, never broker URLs.
+            info['exp'] = min(info['exp'], int(row.get('exp', 0)))
+            if info['exp'] <= now + 120:
+                continue
+            _merge_account(accounts, info)
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return accounts
+
+
 # ---------------------------------------------------------------- Local Harvest
 
 def harvest_local_tokens(now: float = None) -> dict:
@@ -297,12 +366,13 @@ def harvest_local_tokens(now: float = None) -> dict:
 
 
 def harvest_tokens() -> dict:
-    """Harvest tokens from both local IdentityCache and OE Copilot virtual phone."""
+    """Harvest local, SSH phone and optional authenticated broker tokens."""
     now = time.time()
     accounts = harvest_local_tokens(now)
-    remote = harvest_remote_tokens(now)
-    for info in remote.values():
-        _merge_account(accounts, info)
+    from web_session import harvest as harvest_web_tokens
+    for source in (harvest_remote_tokens, harvest_broker_tokens, harvest_web_tokens):
+        for info in source(now).values():
+            _merge_account(accounts, info)
 
     if accounts:
         try:

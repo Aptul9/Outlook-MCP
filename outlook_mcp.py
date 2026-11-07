@@ -540,6 +540,20 @@ ACCOUNT_ARG = {
 
 TOOLS = [
     {
+        'name': 'list_calendars',
+        'description': 'Read calendars using the same account authorization as mail.',
+        'inputSchema': {'type': 'object', 'properties': {'account': ACCOUNT_ARG}},
+        'fn': lambda args: json.dumps(api.list_calendars(args.get('account')), ensure_ascii=False)
+    },
+    {
+        'name': 'list_calendar_events',
+        'description': 'Read a bounded calendar view. Reports has_more when truncated. No RSVP or state changes.',
+        'inputSchema': {'type': 'object', 'required': ['start', 'end'], 'properties': {
+            'account': ACCOUNT_ARG, 'start': {'type': 'string'}, 'end': {'type': 'string'},
+            'calendar_id': {'type': 'string'}, 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 1000}}},
+        'fn': lambda args: json.dumps(api.list_calendar_events(args.get('account'), args['start'], args['end'], args.get('calendar_id'), args.get('limit', 100)), ensure_ascii=False)
+    },
+    {
         'name': 'list_accounts',
         'description': 'List all signed-in Outlook accounts detected on OE Copilot (virtual phone) and local PC, with their token and sync status.',
         'inputSchema': {'type': 'object', 'properties': {}},
