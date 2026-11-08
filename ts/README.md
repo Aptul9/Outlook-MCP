@@ -45,10 +45,10 @@ ssh host 'cd /opt/communication-mcp && find . -mindepth 1 -maxdepth 1 ! -name .e
 
 On `oe-vm` (2026-11-08): `/opt/communication-mcp`, broker mode, `OUTLOOK_MCP_BROKER_KEY` = the agent's `API_KEY` (an OE Copilot Action secret: a rotation there needs the same value here), `OUTLOOK_MCP_TEAMS_TOKEN` = TeamsRelay `MCP_TOKEN`.
 
-Public name: a site in the TeamsRelay Caddy, which already receives every TLS name that sslh does not route elsewhere.
+Public address: a path on the TeamsRelay name (teamsrelay PR 143), so no new DNS name or certificate. The TeamsRelay Caddy strips the prefix; `MCP_HTTP_HOSTS` must then list that name.
 
 ```caddyfile
-mcp.example.com {
+handle_path /communication/* {
 	reverse_proxy communication-mcp:8190
 }
 ```
@@ -59,13 +59,13 @@ Client registration, O?penCode (`opencode.jsonc`):
 "mcp": {
   "communication": {
     "type": "remote",
-    "url": "https://mcp.example.com/mcp",
+    "url": "https://teams.example.com/communication/mcp",
     "headers": { "Authorization": "Bearer {env:COMMUNICATION_MCP_TOKEN}" }
   }
 }
 ```
 
-Claude Code: `claude mcp add --transport http --scope user communication https://mcp.example.com/mcp --header "Authorization: Bearer <token>"`.
+Claude Code: `claude mcp add --transport http --scope user communication https://teams.example.com/communication/mcp --header "Authorization: Bearer <token>"`.
 
 ## Local stdio (compatibility)
 
