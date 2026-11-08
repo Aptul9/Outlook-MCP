@@ -30,6 +30,7 @@ export async function listCalendarEvents(
   const b = instant(end, "end");
   if (b <= a) throw new Error("end must be after start");
   if (b - a > MAX_RANGE_DAYS * 86_400_000) throw new Error(`Calendar range exceeds ${MAX_RANGE_DAYS} days`);
+  if (opt.time_zone && !/^[A-Za-z0-9_+\-/ ]{1,80}$/.test(opt.time_zone)) throw new Error("Invalid calendar time zone");
   const limit = Math.max(1, Math.min(Math.trunc(opt.limit ?? 100) || 100, MAX_EVENTS));
   const base = opt.calendar_id ? `me/calendars/${q(opt.calendar_id)}/calendarview` : "me/calendarview";
   const qs = new URLSearchParams({ startDateTime: new Date(a).toISOString(), endDateTime: new Date(b).toISOString(), $top: String(limit), $select: EVENT_FIELDS, $orderby: "Start/DateTime" });

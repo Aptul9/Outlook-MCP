@@ -14,6 +14,8 @@ test("accountsFrom keeps only Outlook mail tokens for the same mailbox, with tim
     row({ upn: "liar@x.example" }, { upn: "real@x.example" }),
     row({ exp: NOW + 100 }, { upn: "rowexp@x.example" }),
     row(),
+    row({exp:0},{upn:"zero@x.example"}),
+    row({exp:"bad"},{upn:"bad@x.example"}),
     { upn: 1, token: 2 },
     null,
   ];

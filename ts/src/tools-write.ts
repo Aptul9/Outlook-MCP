@@ -118,6 +118,7 @@ async function attachmentsTool(o: Outlook, a: { account?: string; message_id: st
 }
 
 export function registerWriteTools(server: McpServer, o: Outlook) {
+  registerAttachmentTool(server,o);
   server.registerTool(
     "send_email",
     {
@@ -147,22 +148,6 @@ export function registerWriteTools(server: McpServer, o: Outlook) {
     ({ message_id, ...a }) => run(() => doSend(o, { ...a, forward_to_id: message_id })),
   );
   server.registerTool(
-    "get_attachment",
-    {
-      title: "Attachments of an email",
-      description: `Saves the attachments of an email to disk (never overwriting a file), shows images inline, and turns embedded Outlook items into Markdown. index from 1, or attachment_id; all when both are missing. ${THIRD_PARTY}`,
-      inputSchema: z.object({
-        account,
-        message_id: z.string().min(1).max(500),
-        attachment_id: z.string().max(1000).optional(),
-        index: z.number().int().min(1).optional(),
-        save_dir: z.string().max(1000).optional().describe(`Folder to save into (default ${DOWNLOAD_DIR})`),
-      }),
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-    },
-    (a) => run(() => attachmentsTool(o, a)),
-  );
-  server.registerTool(
     "manage_email",
     {
       title: "Manage emails",
@@ -181,5 +166,24 @@ export function registerWriteTools(server: McpServer, o: Outlook) {
         const res = await manageEmail(o, who.upn, a.message_id, a.action, a.destination_folder);
         return [`Executed '${a.action}' on ${res.length} message(s) for ${who.upn}:`, ...res.map((r) => `- ${String(r.id).slice(0, 32)}...: ${r.status}`)].join("\n");
       }),
+  );
+}
+
+export function registerAttachmentTool(server:McpServer,o:Outlook){
+  server.registerTool(
+    "get_attachment",
+    {
+      title: "Attachments of an email",
+      description: `Saves the attachments of an email to disk (never overwriting a file), shows images inline, and turns embedded Outlook items into Markdown. index from 1, or attachment_id; all when both are missing. ${THIRD_PARTY}`,
+      inputSchema: z.object({
+        account,
+        message_id: z.string().min(1).max(500),
+        attachment_id: z.string().max(1000).optional(),
+        index: z.number().int().min(1).optional(),
+        save_dir: z.string().max(1000).optional().describe(`Folder to save into (default ${DOWNLOAD_DIR})`),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    (a) => run(() => attachmentsTool(o, a)),
   );
 }

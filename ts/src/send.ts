@@ -101,6 +101,7 @@ export interface SendResult {
 }
 
 async function viaDraft(o: Outlook, account: string | undefined, targetId: string, action: string, opt: SendOptions): Promise<SendResult> {
+  const atts = attachmentObjects(opt.attachments);
   const draft = await o.request(account, `me/messages/${q(targetId)}/${action}`, "POST", { Comment: formatBodyForHtml(opt.body ?? "", opt.is_html) });
   const draftId = draft.Id as string | undefined;
   if (!draftId) throw new Error(`Failed to create draft via ${action} on message ${targetId}`);
@@ -124,7 +125,6 @@ async function viaDraft(o: Outlook, account: string | undefined, targetId: strin
   const imp = importanceOf(opt.importance);
   if (imp) patch.Importance = imp;
   try {
-    const atts = attachmentObjects(opt.attachments);
     await o.request(account, draftPath, "PATCH", patch);
     for (const a of atts) await o.request(account, `${draftPath}/attachments`, "POST", a);
     if (!opt.save_as_draft) await o.request(account, `${draftPath}/send`, "POST");

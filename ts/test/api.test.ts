@@ -109,3 +109,9 @@ test("calendar view: zone required, bounded range and size, Prefer time zone, ha
   await assert.rejects(listCalendarEvents(o, undefined, "2026-11-10T00:00:00Z", "2026-11-09T00:00:00Z"), /after start/);
   await assert.rejects(listCalendarEvents(o, undefined, "2025-01-01T00:00:00Z", "2026-11-09T00:00:00Z"), /366 days/);
 });
+
+test('missing reply attachment creates no draft',async()=>{
+ const {o,calls}=fake({});
+ await assert.rejects(sendEmail(o,undefined,{reply_to_id:'m1',body:'text',attachments:['C:/no/such/attachment.pdf']}),/not found/);
+ assert.equal(calls.length,0);
+});
