@@ -12,6 +12,28 @@ Reads emails, navigates entire conversation threads, searches messages, download
 
 ---
 
+## Optional authenticated token broker
+
+`outlook_tokens.py` can also read the OE Copilot agent's authenticated `GET /api/token-posta` endpoint. Existing local IdentityCache, SSH harvesting, merge rules and DPAPI cache remain enabled.
+
+Set these environment variables outside committed configuration:
+
+| Variable | Value |
+|---|---|
+| `OUTLOOK_MCP_BROKER_URL` | Full agent endpoint URL ending in `/api/token-posta` |
+| `OUTLOOK_MCP_BROKER_KEY` | Agent bearer credential, supplied at runtime |
+| `OUTLOOK_MCP_BROKER_ACCOUNTS` | Optional comma-separated exact account emails, case-insensitive |
+
+HTTPS is required except for loopback HTTP (for local tunnels and tests). Redirects are rejected. The broker key is never sent to Microsoft APIs. The adapter accepts the agent response shape `{"account": [{"upn": "...", "token": "...", "exp": 123}]}`. JWT audience and mail scopes determine the API endpoint; response-provided API URLs are ignored. Both JWT and row expiry must exceed the current time by 120 seconds. An invalid row is skipped; an unavailable or misconfigured broker contributes no accounts. No broker response body, exception detail or credential is logged.
+
+The allowlist applies only to broker accounts; it does not restrict local or SSH sources. Existing MCP `account` selection remains substring-based. Tokens retain the existing merge priority (Outlook REST before Graph, then later expiry); configuring the broker does not override that priority. Existing cached accounts may be returned until the next refresh, so changes to the allowlist take effect on a fresh harvest, not as an access-control boundary. The broker is an optional token source, not browser login or token renewal. Calendar tools are outside this adapter.
+
+Run fake-endpoint tests on Windows:
+
+```powershell
+python -W error::ResourceWarning -m unittest -v test_broker
+```
+
 ## Tools
 
 | Tool | Description | Key Arguments |
@@ -61,3 +83,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -NoClaudeCode
 - **Exclude specific people on reply-all**: pass `exclude_recipients` to strip specific addresses from `To` and `Cc`.
 - **Rich HTML or plain text**: when `is_html: true` (or when `body` contains HTML tags), rich HTML is inserted directly above the quoted thread. When `is_html: false` (plain text), line breaks (`\n`) are automatically converted to `<br>` so paragraphs are never collapsed.
 - **Draft mode**: pass `save_as_draft: true` to create the message/reply/forward in `Drafts` without sending immediately.
+
+## Microsoft browser sessions
+
+`web_session.py` reuses an existing Microsoft browser session accepted by Outlook web. Its input matches TeamsRelay `session.json`, with `tenantId` added. It uses Outlook web authorization, not the Teams resource token. No tenant policy is changed. If Microsoft requires an interactive sign-in, an existing session must be renewed before importing it again.
+
+Import over stdin without writing plaintext credentials locally:
+
+```powershell
+ssh oe-vm cat /opt/teamsrelay/data/2/session.json | python web_session.py --tenant <tenant-id> --output "$env:LOCALAPPDATA\OutlookMCP\msc-web-session.bin"
+```
+
+Set `OUTLOOK_MCP_WEB_SESSION_FILE` to that encrypted file in the MCP process environment. The existing MCP token cache remains DPAPI-encrypted. A new authorization runs when harvesting tokens; the source file is read-only and does not renew the browser session's cookies. Browser session expiry requires a fresh import. Authorization proves the returned mailbox and Outlook audience before accepting the token.
+
+MSC live checks: native Outlook Mobile authorization denied `AADSTS53003`; Outlook web authorization, immediate refresh-token exchange, mail read, calendars and calendar view succeeded. Long-duration renewal remains untested. Outlook REST v2.0 is deprecated by Microsoft; current endpoint success is not a support guarantee.
+
+The `list_calendars` and `list_calendar_events` tools share the existing mail authorization and HTTP transport. Calendar view is bounded to 366 days and 1000 rows, with `has_more` reported on truncation. No calendar writes are implemented.
+
+No standalone library was extracted: the existing Python API module already provides the shared boundary. OE-Copilot production integration remains separate from these isolated changes.

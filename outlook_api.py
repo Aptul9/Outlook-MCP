@@ -856,3 +856,25 @@ def manage_email(account: str = None, message_id=None, action: str = None,
             moved = _request(account, f"{mpath}/move", method='POST', data={'DestinationId': dest_id})
             results.append({'id': mid, 'new_id': moved.get('Id', mid), 'status': f"moved_to_{dest_id}"})
     return results
+
+
+def list_calendars(account=None):
+    """Read calendars through the same token and API transport as mail."""
+    return _request(account, 'me/calendars?$top=100').get('value', [])
+
+
+def list_calendar_events(account, start, end, calendar_id=None, limit=100):
+    """Read bounded calendar view without changing RSVP or mailbox state."""
+    begin = dt.datetime.fromisoformat(start.replace('Z', '+00:00'))
+    finish = dt.datetime.fromisoformat(end.replace('Z', '+00:00'))
+    if begin.tzinfo is None or finish.tzinfo is None or finish <= begin:
+        raise ValueError('Calendar range requires timezone-aware start before end')
+    if finish - begin > dt.timedelta(days=366):
+        raise ValueError('Calendar range exceeds 366 days')
+    limit = max(1, min(int(limit), 1000))
+    path = 'me/'
+    if calendar_id:
+        path += 'calendars/' + urllib.parse.quote(calendar_id, safe='') + '/'
+    query = urllib.parse.urlencode(dict(startDateTime=start, endDateTime=end, **{'$top':limit, '$select':'Id,Subject,Start,End,IsAllDay,ShowAs,Location,Organizer,IsCancelled'}))
+    result = _request(account, path + 'calendarview?' + query)
+    return {'events': result.get('value', []), 'has_more': bool(result.get('@odata.nextLink'))}
