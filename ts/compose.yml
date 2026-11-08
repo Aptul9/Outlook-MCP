@@ -1,0 +1,32 @@
+# Remote MCP on the host of OE Copilot and TeamsRelay (README.md, "Remote server"). It joins their compose networks to reach
+# the OE Copilot agent (agent:8180) and the TeamsRelay web app (webapp:8090) without leaving the host, and so that the
+# TeamsRelay Caddy can proxy the public name to it. Secrets and addresses come from .env (.env.example).
+name: communication-mcp
+services:
+  mcp:
+    build: .
+    image: communication-mcp
+    container_name: communication-mcp
+    env_file: .env
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # loopback only: the public name goes through the TeamsRelay Caddy on the shared network
+    ports:
+      - "127.0.0.1:8190:8190"
+    networks:
+      - oe
+      - teams
+    restart: unless-stopped
+
+networks:
+  oe:
+    name: oe-copilot_default
+    external: true
+  teams:
+    name: teamsrelay_default
+    external: true

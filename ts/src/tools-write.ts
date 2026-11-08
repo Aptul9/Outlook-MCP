@@ -15,7 +15,13 @@ const SENDS = { readOnlyHint: false, destructiveHint: false, idempotentHint: fal
 export const DOWNLOAD_DIR = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), ".local", "share"), "OutlookMCP", "downloads");
 
 const recipients = z.union([z.string().max(5000), z.array(z.string().max(500)).max(200)]);
-const sendFields = {
+/** Remote server: files travel in the request (http.ts caps the request body at 4 MiB). */
+const inlineFiles = z
+  .array(z.object({ name: z.string().min(1).max(255), content_base64: z.string().min(1).max(4_000_000), content_type: z.string().max(200).optional() }))
+  .max(20)
+  .optional()
+  .describe("Files to attach, base64 content: this server cannot read the caller's disk");
+const localFields = {
   account,
   to: recipients.optional().describe("Address or list; on a reply it replaces the To of the thread"),
   cc: recipients.optional(),
@@ -27,6 +33,8 @@ const sendFields = {
   attachments: z.array(z.string().max(1000)).max(50).optional().describe("Local file paths to attach"),
   save_as_draft: z.boolean().optional().describe("Keep it in Drafts instead of sending"),
 };
+const { attachments: _localPaths, ...common } = localFields;
+const remoteFields = { ...common, files: inlineFiles };
 
 function sendText(upn: string, r: SendResult, label: string): string {
   const parts = [`${label} ${r.status === "draft" ? "saved as draft" : "successfully sent"} from ${upn}.`];
@@ -67,7 +75,11 @@ function freePath(dir: string, name: string): string {
   }
 }
 
-async function attachmentsTool(o: Outlook, a: { account?: string; message_id: string; attachment_id?: string; index?: number; save_dir?: string }): Promise<CallToolResult | string> {
+async function attachmentsTool(
+  o: Outlook,
+  a: { account?: string; message_id: string; attachment_id?: string; index?: number; save_dir?: string },
+  remote: boolean,
+): Promise<CallToolResult | string> {
   const who = await o.account(a.account);
   const atts = await listAttachments(o, who.upn, a.message_id);
   if (!atts.length) return `No attachments on message ${a.message_id}.`;
@@ -80,9 +92,9 @@ async function attachmentsTool(o: Outlook, a: { account?: string; message_id: st
     picked = [[a.index, atts[a.index - 1]!]];
   } else picked = atts.map((x, i): [number, Obj] => [i + 1, x]);
   const dir = a.save_dir || DOWNLOAD_DIR;
-  fs.mkdirSync(dir, { recursive: true });
+  if (!remote) fs.mkdirSync(dir, { recursive: true });
   const lines = [`${atts.length} attachment(s) on message ${a.message_id}:`];
-  const images: CallToolResult["content"] = [];
+  const blocks: CallToolResult["content"] = [];
   for (const [n, meta] of picked) {
     const full = await getAttachment(o, who.upn, a.message_id, meta.Id);
     const type = String(full["@odata.type"] ?? meta["@odata.type"] ?? "").toLowerCase();
@@ -95,6 +107,10 @@ async function attachmentsTool(o: Outlook, a: { account?: string; message_id: st
         continue;
       }
       const md = messageFull(item);
+      if (remote) {
+        lines.push(`  #${n} "${name}": embedded Outlook item as Markdown:`, md);
+        continue;
+      }
       const p = freePath(dir, `${safeFilename(name, `item-${n}`)}.md`);
       fs.writeFileSync(p, md, "utf-8");
       lines.push(`  #${n} "${name}": embedded Outlook item saved as Markdown to ${p}:`, md);
@@ -109,22 +125,36 @@ async function attachmentsTool(o: Outlook, a: { account?: string; message_id: st
       continue;
     }
     const data = Buffer.from(String(full.ContentBytes), "base64");
+    const size = `${(data.length / 1024).toFixed(1)} KB, ${mime}`;
+    if (remote) {
+      // the bytes go back in the result: the server's disk is not the caller's
+      const uri = `attachment:///${encodeURIComponent(safeFilename(name, `attachment-${n}`))}`;
+      lines.push(`  #${n} "${name}" (${size}): content block ${blocks.length + 2}`);
+      blocks.push(
+        mime.startsWith("image/")
+          ? { type: "image", data: String(full.ContentBytes), mimeType: mime }
+          : { type: "resource", resource: { uri, mimeType: mime, blob: String(full.ContentBytes) } },
+      );
+      continue;
+    }
     const p = freePath(dir, safeFilename(name, `attachment-${n}`));
     fs.writeFileSync(p, data);
-    lines.push(`  #${n} "${name}" saved: ${p} (${(data.length / 1024).toFixed(1)} KB, ${mime})`);
-    if (mime.startsWith("image/")) images.push({ type: "image", data: String(full.ContentBytes), mimeType: mime });
+    lines.push(`  #${n} "${name}" saved: ${p} (${size})`);
+    if (mime.startsWith("image/")) blocks.push({ type: "image", data: String(full.ContentBytes), mimeType: mime });
   }
-  return { content: [{ type: "text", text: lines.join("\n") }, ...images] };
+  return { content: [{ type: "text", text: lines.join("\n") }, ...blocks] };
 }
 
-export function registerWriteTools(server: McpServer, o: Outlook) {
-  registerAttachmentTool(server,o);
+/** remote: the server runs elsewhere than its caller (http.ts): attachments travel as base64, never as local paths. */
+export function registerWriteTools(server: McpServer, o: Outlook, remote = false) {
+  registerAttachmentTool(server, o, remote);
+  const sendFields = remote ? remoteFields : localFields;
   server.registerTool(
     "send_email",
     {
       title: "Send, reply or forward",
       description:
-        "Sends a new email, replies (reply_to_id, reply_all) or forwards (forward_to_id), or saves any of them as a draft. HTML or text body, cc/bcc, selective reply (to, replace_cc, exclude_recipients), local file attachments. Sends immediately unless save_as_draft.",
+        `Sends a new email, replies (reply_to_id, reply_all) or forwards (forward_to_id), or saves any of them as a draft. HTML or text body, cc/bcc, selective reply (to, replace_cc, exclude_recipients), ${remote ? "attachments as base64 files" : "local file attachments"}. Sends immediately unless save_as_draft.`,
       inputSchema: z.object({
         ...sendFields,
         reply_to_id: z.string().max(500).optional().describe("Message id to reply to; keeps the thread"),
@@ -141,7 +171,7 @@ export function registerWriteTools(server: McpServer, o: Outlook) {
     "forward_email",
     {
       title: "Forward an email",
-      description: "Forwards an email with its attachments and quoted text, with an optional comment, cc/bcc and extra local attachments. Sends immediately unless save_as_draft.",
+      description: `Forwards an email with its attachments and quoted text, with an optional comment, cc/bcc and extra ${remote ? "base64 files" : "local attachments"}. Sends immediately unless save_as_draft.`,
       inputSchema: z.object({ ...sendFields, message_id: z.string().min(1).max(500), to: recipients }),
       annotations: SENDS,
     },
@@ -169,21 +199,18 @@ export function registerWriteTools(server: McpServer, o: Outlook) {
   );
 }
 
-export function registerAttachmentTool(server:McpServer,o:Outlook){
+export function registerAttachmentTool(server: McpServer, o: Outlook, remote = false) {
+  const pick = { account, message_id: z.string().min(1).max(500), attachment_id: z.string().max(1000).optional(), index: z.number().int().min(1).optional() };
   server.registerTool(
     "get_attachment",
     {
       title: "Attachments of an email",
-      description: `Saves the attachments of an email to disk (never overwriting a file), shows images inline, and turns embedded Outlook items into Markdown. index from 1, or attachment_id; all when both are missing. ${THIRD_PARTY}`,
-      inputSchema: z.object({
-        account,
-        message_id: z.string().min(1).max(500),
-        attachment_id: z.string().max(1000).optional(),
-        index: z.number().int().min(1).optional(),
-        save_dir: z.string().max(1000).optional().describe(`Folder to save into (default ${DOWNLOAD_DIR})`),
-      }),
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      description: remote
+        ? `Returns the attachments of an email in the result: images inline, other files as embedded resources (base64), embedded Outlook items as Markdown. Nothing is written to disk. index from 1, or attachment_id; all when both are missing. ${THIRD_PARTY}`
+        : `Saves the attachments of an email to disk (never overwriting a file), shows images inline, and turns embedded Outlook items into Markdown. index from 1, or attachment_id; all when both are missing. ${THIRD_PARTY}`,
+      inputSchema: remote ? z.object(pick) : z.object({ ...pick, save_dir: z.string().max(1000).optional().describe(`Folder to save into (default ${DOWNLOAD_DIR})`) }),
+      annotations: remote ? { readOnlyHint: true, openWorldHint: false } : { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    (a) => run(() => attachmentsTool(o, a)),
+    (a) => run(() => attachmentsTool(o, a, remote)),
   );
 }

@@ -3,3 +3,4 @@ __pycache__/
 tokens.bin*
 *.tmp
 node_modules/
+.env

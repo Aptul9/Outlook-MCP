@@ -58,13 +58,32 @@ function mergeRecipients(existing: Obj[] = [], extra: Obj[] = []): Obj[] {
 
 const withoutExcluded = (recs: Obj[], excluded: Set<string>) => (excluded.size ? recs.filter((r) => !excluded.has(addr(r))) : recs);
 
-/** Local files as FileAttachment objects; a missing file stops the send before anything is created. */
-export function attachmentObjects(files: string[] = []): Obj[] {
-  return files.map((f) => {
+/** A file sent with the request (remote server: the caller's disk is not reachable). */
+export interface InlineFile {
+  name: string;
+  content_base64: string;
+  content_type?: string;
+}
+
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/** Local files and inline files as FileAttachment objects; a missing or malformed file stops the send before anything is created. */
+export function attachmentObjects(files: string[] = [], inline: InlineFile[] = []): Obj[] {
+  const local = files.map((f) => {
     const p = f.trim().replace(/^~(?=$|[\\/])/, process.env.USERPROFILE || process.env.HOME || "~");
     if (!fs.existsSync(p) || !fs.statSync(p).isFile()) throw new Error(`Attachment file not found: ${p}`);
     return { "@odata.type": "#Microsoft.OutlookServices.FileAttachment", Name: path.basename(p), ContentBytes: fs.readFileSync(p).toString("base64") };
   });
+  const sent = inline.map((f) => {
+    const name = path.basename(f.name.replace(/\\/g, "/")).trim();
+    const bytes = f.content_base64.replace(/\s+/g, "");
+    if (!name) throw new Error("Attachment name is empty");
+    if (!bytes || bytes.length % 4 !== 0 || !BASE64.test(bytes)) throw new Error(`Attachment ${name}: content_base64 is not base64`);
+    const a: Obj = { "@odata.type": "#Microsoft.OutlookServices.FileAttachment", Name: name, ContentBytes: bytes };
+    if (f.content_type) a.ContentType = f.content_type;
+    return a;
+  });
+  return [...local, ...sent];
 }
 
 const importanceOf = (v?: string) => {
@@ -86,6 +105,7 @@ export interface SendOptions {
   exclude_recipients?: Recipients;
   importance?: string;
   attachments?: string[];
+  files?: InlineFile[];
   save_as_draft?: boolean;
 }
 
@@ -101,7 +121,7 @@ export interface SendResult {
 }
 
 async function viaDraft(o: Outlook, account: string | undefined, targetId: string, action: string, opt: SendOptions): Promise<SendResult> {
-  const atts = attachmentObjects(opt.attachments);
+  const atts = attachmentObjects(opt.attachments, opt.files);
   const draft = await o.request(account, `me/messages/${q(targetId)}/${action}`, "POST", { Comment: formatBodyForHtml(opt.body ?? "", opt.is_html) });
   const draftId = draft.Id as string | undefined;
   if (!draftId) throw new Error(`Failed to create draft via ${action} on message ${targetId}`);
@@ -164,7 +184,7 @@ export async function sendEmail(o: Outlook, account: string | undefined, opt: Se
   if (bccR.length) message.BccRecipients = bccR;
   const imp = importanceOf(opt.importance);
   if (imp) message.Importance = imp;
-  const atts = attachmentObjects(opt.attachments);
+  const atts = attachmentObjects(opt.attachments, opt.files);
   const summary = { subject: opt.subject ?? "", to: addrList(toR), cc: addrList(ccR), bcc: addrList(bccR) };
   if (opt.save_as_draft) {
     const draft = await o.request(account, "me/messages", "POST", message);

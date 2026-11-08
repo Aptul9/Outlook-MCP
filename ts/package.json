@@ -3,11 +3,12 @@
   "version": "3.0.0",
   "private": true,
   "type": "module",
-  "description": "Outlook mail and calendar MCP over the OE Copilot token broker",
+  "description": "Remote MCP for mail, calendars and Teams over OE Copilot and TeamsRelay",
   "scripts": {
-    "start": "node src/main.ts",
+    "start": "node src/http.ts",
     "test": "node --test \"test/*.test.ts\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "start:stdio": "node src/main.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/client": "2.4.0",

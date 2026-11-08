@@ -44,11 +44,14 @@ test("listEmails: filter and order without query, search plus local filters with
   });
   await listEmails(o, undefined, { unread_only: true, start_date: "2026-11-01" });
   const u = decodeURIComponent(calls[0]!.url);
-  assert.match(u, /\$filter=IsRead eq false and ReceivedDateTime ge 2026-11-01T00:00:00Z/);
+  assert.match(u, /\$filter=ReceivedDateTime ge 2026-11-01T00:00:00Z and IsRead eq false&/);
   assert.match(u, /\$orderby=ReceivedDateTime desc/);
+  // the ordering property leads every filter (Outlook InefficientFilter otherwise)
+  await listEmails(o, undefined, { has_attachments: true });
+  assert.match(decodeURIComponent(calls.at(-1)!.url), /\$filter=ReceivedDateTime ge 1900-01-01T00:00:00Z and HasAttachments eq true&/);
   const hits = await listEmails(o, undefined, { folder: "all", query: 'q"x', unread_only: true, from_address: "boss" });
   assert.deepEqual(hits.map((m) => m.Id), ["b"]);
-  assert.match(decodeURIComponent(calls[1]!.url), /\$search="qx"/);
+  assert.match(decodeURIComponent(calls.at(-1)!.url), /\$search="qx"/);
 });
 
 test("readThread: conversation id from a message id, quoted, oldest first", async () => {

@@ -261,8 +261,13 @@ export async function listEmailsPage(
       filters.push("HasAttachments eq false");
     const start = normalizeIsoDate(opt.start_date);
     const end = normalizeIsoDate(opt.end_date, true);
-    if (start) filters.push(`ReceivedDateTime ge ${start}`);
-    if (end) filters.push(`ReceivedDateTime le ${end}`);
+    // $filter next to $orderby: Outlook answers 400 InefficientFilter (HasAttachments, live 2026-11-08) unless the
+    // ordering property leads the filter, so ReceivedDateTime goes first, with an always-true bound when no date is given
+    const dated: string[] = [];
+    if (start) dated.push(`ReceivedDateTime ge ${start}`);
+    if (end) dated.push(`ReceivedDateTime le ${end}`);
+    if (!dated.length && filters.length) dated.push("ReceivedDateTime ge 1900-01-01T00:00:00Z");
+    filters.unshift(...dated);
     if (filters.length) params.push(`$filter=${q(filters.join(" and "))}`);
     params.push(`$orderby=${q("ReceivedDateTime desc")}`);
   }

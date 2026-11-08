@@ -4,6 +4,7 @@
 
 import { Client, ProtocolError, SdkError, SdkErrorCode, SdkHttpError, StreamableHTTPClientTransport, UnauthorizedError, type FetchLike, type Tool } from "@modelcontextprotocol/client";
 import { fromJsonSchema, type CallToolResult, type JsonSchemaType, type McpServer } from "@modelcontextprotocol/server";
+import { backendUrl } from "./url.ts";
 
 export const TEAMS_PREFIX = "teams_";
 export const CONNECT_TIMEOUT_MS = 15_000;
@@ -44,15 +45,11 @@ export interface TeamsRelay {
 /** null when the URL is unset (Teams off). https, or http on localhost, without credentials, query or fragment; token required. */
 export function teamsConfig(url: string | undefined, token: string | undefined): TeamsConfig | null {
   if (!url?.trim()) return null;
-  let u: URL;
-  try {
-    u = new URL(url.trim());
-  } catch {
-    throw new TeamsConfigError("OUTLOOK_MCP_TEAMS_URL is not a valid URL");
-  }
-  const local = ["127.0.0.1", "::1", "[::1]", "localhost"].includes(u.hostname);
-  if (u.username || u.password || u.search || u.hash || !(u.protocol === "https:" || (u.protocol === "http:" && local))) {
-    throw new TeamsConfigError("OUTLOOK_MCP_TEAMS_URL must be https, or http on localhost, without credentials, query or fragment");
+  const u = backendUrl(url);
+  if (!u) {
+    throw new TeamsConfigError(
+      "OUTLOOK_MCP_TEAMS_URL must be https, or http on localhost or a container service name, without credentials, query or fragment",
+    );
   }
   const t = token?.trim() ?? "";
   if (!t) throw new TeamsConfigError("OUTLOOK_MCP_TEAMS_URL needs OUTLOOK_MCP_TEAMS_TOKEN");
@@ -103,17 +100,60 @@ function guardedFetch(url: URL, timeoutMs: () => number, base: FetchLike): Fetch
   };
 }
 
+/** A connected relay client: the SDK client plus its own header timeout (discovery bound first, call bound after). */
+interface Link {
+  client: Client;
+  setHeaderMs(ms: number): void;
+  close(): Promise<void>;
+}
+
+/** One discovered tool, converted once and registered on every server instance. */
+interface Discovered {
+  upstream: string;
+  name: string;
+  config: {
+    title?: string;
+    description?: string;
+    inputSchema: ReturnType<typeof fromJsonSchema<Record<string, unknown>>>;
+    outputSchema?: ReturnType<typeof fromJsonSchema>;
+    annotations?: Tool["annotations"];
+    icons?: Tool["icons"];
+    _meta?: Tool["_meta"];
+  };
+}
+
+export interface TeamsBridge {
+  /** Tool names currently offered, prefix included */
+  readonly tools: string[];
+  /** Configuration error or last discovery failure; never carries relay text */
+  readonly error?: string;
+  /**
+   * Registers the discovered tools on `server`. Calls go through the bridge's one relay connection, so many short-lived
+   * server instances (one per HTTP request) share a single discovery. When the last discovery failed, is older than
+   * maxAgeMs, or a call lost the connection, a rediscovery starts in the background; this server keeps the current list.
+   */
+  register(server: McpServer): string[];
+  /** Discovers now, sharing a discovery already running. Never throws */
+  refresh(): Promise<void>;
+  /** Closes the relay connection; idempotent */
+  close(): Promise<void>;
+}
+
+export interface BridgeOptions extends TeamsOptions {
+  /** Least time between two rediscovery attempts after a failure. Default 60 s */
+  retryMs?: number;
+  /** Age after which a successful tool list is fetched again. Default 10 min */
+  maxAgeMs?: number;
+}
+
+const OFF: TeamsBridge = { tools: [], register: () => [], refresh: async () => {}, close: async () => {} };
+
 /**
- * Connects to the TeamsRelay MCP endpoint, lists its tools once and registers each on `server` as teams_<name>, with its title,
- * description, input and output schema, annotations, icons and _meta. A call goes upstream unchanged and its result (content
- * blocks, structuredContent, isError) comes back unchanged; a transport failure becomes an isError result, a JSON-RPC error from
- * the relay an isError result with its message, token redacted.
- * Never throws for Teams: no URL configured gives no network and no tool; an invalid configuration, an unreachable relay or a
- * refused token give no tool and `error`. Mail and calendar tools stay as registered. A name already registered on `server` is
- * skipped, never replaced. stderr gets only messages from describe(), never relay text or the token.
+ * Connects to the TeamsRelay MCP endpoint and lists its tools, for every server built afterwards (see TeamsBridge.register).
+ * Never throws: no URL gives no network and no tool; an invalid configuration, an unreachable relay or a refused token give
+ * no tool and `error`, and the relay is tried again later. stderr gets only messages from describe(), never relay text or the token.
  */
-export async function registerTeamsTools(server: McpServer, options: TeamsOptions = {}): Promise<TeamsRelay> {
-  const off = { tools: [], close: async () => {} };
+export async function connectTeams(options: BridgeOptions = {}): Promise<TeamsBridge> {
   const env = options.env ?? process.env;
   let config: TeamsConfig | null;
   try {
@@ -121,91 +161,206 @@ export async function registerTeamsTools(server: McpServer, options: TeamsOption
   } catch (e) {
     const error = `Teams tools off, invalid configuration: ${describe(e)}`;
     console.error(`outlook-mcp: ${error}`);
-    return { ...off, error };
+    return { ...OFF, error };
   }
-  if (!config) return off;
-  const token = config.token;
+  if (!config) return OFF;
+  const { url, token } = config;
   const redact = (s: string) => s.split(token).join("[redacted]").slice(0, 500);
   const connectMs = options.connectTimeoutMs ?? CONNECT_TIMEOUT_MS;
   const callMs = options.callTimeoutMs ?? CALL_TIMEOUT_MS;
-  let headerMs = connectMs;
+  const retryMs = options.retryMs ?? 60_000;
+  const maxAgeMs = options.maxAgeMs ?? 600_000;
 
-  let closing: Promise<void> | undefined;
-  const client = new Client({ name: "outlook-mcp-teams", version: "3.0.0" });
-  client.onerror = (e) => {
-    if (!closing) console.error(`outlook-mcp: Teams relay: ${describe(e)}`);
+  let link: Link | null = null;
+  let discovered: Discovered[] = [];
+  let error: string | undefined;
+  let lastAttempt = 0;
+  let lastSuccess = 0;
+  let stale = false;
+  let running: Promise<void> | undefined;
+  let closed = false;
+
+  const open = async (): Promise<Link> => {
+    let headerMs = connectMs;
+    let closing: Promise<void> | undefined;
+    const client = new Client({ name: "outlook-mcp-teams", version: "3.0.0" });
+    client.onerror = (e) => {
+      if (!closing) console.error(`outlook-mcp: Teams relay: ${describe(e)}`);
+    };
+    const transport = new StreamableHTTPClientTransport(url, {
+      authProvider: { token: async () => token },
+      fetch: guardedFetch(url, () => headerMs, options.fetch ?? fetch),
+    });
+    const l: Link = { client, setHeaderMs: (ms) => void (headerMs = ms), close: () => (closing ??= client.close().catch(() => {})) };
+    try {
+      await client.connect(transport, { timeout: connectMs });
+    } catch (e) {
+      await l.close();
+      throw e;
+    }
+    return l;
   };
-  const transport = new StreamableHTTPClientTransport(config.url, {
-    authProvider: { token: async () => token },
-    fetch: guardedFetch(config.url, () => headerMs, options.fetch ?? fetch),
-  });
-  const close = () => (closing ??= client.close().catch(() => {}));
 
-  let tools: Tool[];
-  try {
-    await client.connect(transport, { timeout: connectMs });
-    tools = [];
+  const listAll = async (client: Client): Promise<Tool[]> => {
+    const tools: Tool[] = [];
     let cursor: string | undefined;
-    const seenCursors = new Set<string>();
+    const seen = new Set<string>();
     for (let page = 0; page < 20; page++) {
       const result = await client.listTools(cursor ? { cursor } : undefined, { timeout: connectMs });
       tools.push(...result.tools);
-      if (!result.nextCursor) break;
-      if (seenCursors.has(result.nextCursor) || page === 19) throw new Error("Teams tool pagination did not finish");
-      seenCursors.add(result.nextCursor);
+      if (!result.nextCursor) return tools;
+      if (seen.has(result.nextCursor)) break;
+      seen.add(result.nextCursor);
       cursor = result.nextCursor;
     }
-  } catch (e) {
-    await close();
-    const error = `Teams relay unavailable: ${describe(e)}`;
-    console.error(`outlook-mcp: ${error}`);
-    return { tools: [], error, close };
-  }
-  headerMs = callMs;
+    throw new RelayError("tool pagination did not finish");
+  };
 
-  const names: string[] = [];
-  let badNames = 0;
-  for (const t of tools) {
-    const name = TEAMS_PREFIX + t.name;
-    if (!TOOL_NAME.test(name)) {
-      badNames++;
-      continue;
+  const convert = (tools: Tool[]): Discovered[] => {
+    const out: Discovered[] = [];
+    let badNames = 0;
+    for (const t of tools) {
+      const name = TEAMS_PREFIX + t.name;
+      if (!TOOL_NAME.test(name)) {
+        badNames++;
+        continue;
+      }
+      try {
+        out.push({
+          upstream: t.name,
+          name,
+          config: {
+            title: t.title,
+            description: t.description,
+            inputSchema: fromJsonSchema<Record<string, unknown>>(t.inputSchema as JsonSchemaType),
+            outputSchema: t.outputSchema ? fromJsonSchema(t.outputSchema as JsonSchemaType) : undefined,
+            annotations: t.annotations,
+            icons: t.icons,
+            _meta: t._meta,
+          },
+        });
+      } catch {
+        console.error(`outlook-mcp: Teams tool ${redact(name)} skipped: schema not usable`);
+      }
     }
+    if (badNames) console.error(`outlook-mcp: ${badNames} Teams tool(s) skipped: name not valid for MCP`);
+    return out;
+  };
+
+  const discover = async () => {
+    lastAttempt = Date.now();
     try {
-      server.registerTool(
-        name,
-        {
-          title: t.title,
-          description: t.description,
-          inputSchema: fromJsonSchema<Record<string, unknown>>(t.inputSchema as JsonSchemaType),
-          outputSchema: t.outputSchema ? fromJsonSchema(t.outputSchema as JsonSchemaType) : undefined,
-          annotations: t.annotations,
-          icons: t.icons,
-          _meta: t._meta,
-        },
-        async (args, ctx) => {
-          try {
-            return await client.callTool({ name: t.name, arguments: args }, { timeout: callMs, maxTotalTimeout: callMs, signal: ctx.mcpReq.signal });
-          } catch (e) {
-            return failure(e instanceof ProtocolError ? `Teams relay error ${e.code}: ${redact(e.message)}` : `Teams relay error: ${describe(e)}`);
-          }
-        },
-      );
-      names.push(name);
+      let tools: Tool[] | undefined;
+      if (link && !stale) {
+        link.setHeaderMs(connectMs);
+        try {
+          tools = await listAll(link.client);
+        } catch {
+          // the old connection may be gone (relay restart): one fresh connection below
+        } finally {
+          link?.setHeaderMs(callMs);
+        }
+      }
+      if (!tools) {
+        const fresh = await open();
+        try {
+          tools = await listAll(fresh.client);
+        } catch (e) {
+          await fresh.close();
+          throw e;
+        }
+        if (closed) {
+          await fresh.close();
+          return;
+        }
+        fresh.setHeaderMs(callMs);
+        const old = link;
+        link = fresh;
+        // calls still running on the old connection keep it until they settle; new calls use the fresh one
+        if (old) setTimeout(() => void old.close(), callMs).unref();
+      }
+      discovered = convert(tools);
+      error = undefined;
+      stale = false;
+      lastSuccess = Date.now();
     } catch (e) {
-      const taken = e instanceof Error && e.message === `Tool ${name} is already registered`;
-      console.error(`outlook-mcp: Teams tool ${redact(name)} skipped: ${taken ? "name already registered" : "schema not usable"}`);
+      error = `Teams relay unavailable: ${describe(e)}`;
+      console.error(`outlook-mcp: ${error}`);
     }
-  }
-  if (badNames) console.error(`outlook-mcp: ${badNames} Teams tool(s) skipped: name not valid for MCP`);
-  if (!names.length) {
-    await close();
-    return { tools: [], close };
+  };
+
+  const refresh = () => {
+    if (closed) return Promise.resolve();
+    return (running ??= discover().finally(() => (running = undefined)));
+  };
+
+  const due = () => {
+    const now = Date.now();
+    if (running || closed) return false;
+    if (error || stale) return now - lastAttempt >= retryMs;
+    return now - lastSuccess >= maxAgeMs;
+  };
+
+  const call = async (upstream: string, args: Record<string, unknown>, signal: AbortSignal): Promise<CallToolResult> => {
+    const l = link;
+    if (!l) return failure(`Teams relay error: ${error ?? "not connected"}`);
+    try {
+      return (await l.client.callTool({ name: upstream, arguments: args }, { timeout: callMs, maxTotalTimeout: callMs, signal })) as CallToolResult;
+    } catch (e) {
+      if (e instanceof ProtocolError) return failure(`Teams relay error ${e.code}: ${redact(e.message)}`);
+      // transport failure: the next server instance triggers a reconnect (rate limited by retryMs)
+      if (!(e instanceof Error && e.name === "AbortError")) stale = true;
+      return failure(`Teams relay error: ${describe(e)}`);
+    }
+  };
+
+  await refresh();
+
+  return {
+    get tools() {
+      return discovered.map((d) => d.name);
+    },
+    get error() {
+      return error;
+    },
+    register(server) {
+      if (due()) void refresh();
+      const names: string[] = [];
+      for (const d of discovered) {
+        try {
+          server.registerTool(d.name, d.config, (args, ctx) => call(d.upstream, args as Record<string, unknown>, ctx.mcpReq.signal));
+          names.push(d.name);
+        } catch (e) {
+          const taken = e instanceof Error && e.message === `Tool ${d.name} is already registered`;
+          console.error(`outlook-mcp: Teams tool ${redact(d.name)} skipped: ${taken ? "name already registered" : "schema not usable"}`);
+        }
+      }
+      return names;
+    },
+    refresh,
+    async close() {
+      closed = true;
+      await running;
+      await link?.close();
+    },
+  };
+}
+
+/**
+ * One server, one relay connection (stdio and tests): connectTeams, register on `server`, close the connection when the
+ * server's transport closes. Same guarantees as connectTeams; a name already registered on `server` is skipped, never replaced.
+ */
+export async function registerTeamsTools(server: McpServer, options: TeamsOptions = {}): Promise<TeamsRelay> {
+  const bridge = await connectTeams({ ...options, retryMs: Number.POSITIVE_INFINITY, maxAgeMs: Number.POSITIVE_INFINITY });
+  const tools = bridge.register(server);
+  if (!tools.length) {
+    await bridge.close();
+    return { tools: [], error: bridge.error, close: bridge.close };
   }
   const previous = server.server.onclose;
   server.server.onclose = () => {
     previous?.();
-    void close();
+    void bridge.close();
   };
-  return { tools: names, close };
+  return { tools, error: bridge.error, close: bridge.close };
 }

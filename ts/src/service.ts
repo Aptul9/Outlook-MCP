@@ -2,6 +2,7 @@
 import { execFile } from "node:child_process";
 import { Outlook, ApiError, type Obj } from "./api.ts";
 import { Tokens, selectAccount, type Account } from "./tokens.ts";
+import { backendUrl } from "./url.ts";
 export type GatewayCall = (path: string, body?: unknown) => Promise<Obj>;
 
 export function httpGateway(
@@ -9,19 +10,8 @@ export function httpGateway(
   key: string,
   fetchFn = fetch,
 ): GatewayCall {
-  const u = new URL(base);
-  if (
-    u.username ||
-    u.password ||
-    u.search ||
-    u.hash ||
-    u.pathname !== "/" ||
-    !(
-      u.protocol === "https:" ||
-      (u.protocol === "http:" &&
-        ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname))
-    )
-  )
+  const u = backendUrl(base);
+  if (!u || u.pathname !== "/")
     throw new Error("Invalid communication service URL");
   return async (p, body) => {
     if (!["/api/communication/accounts", "/api/communication/read"].includes(p))

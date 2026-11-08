@@ -2,6 +2,7 @@
 // mailbox (Outlook Mobile, Outlook web session); this process only reads current access tokens, keeps them in memory, never on disk.
 
 import { execFile } from "node:child_process";
+import { backendUrl } from "./url.ts";
 
 export const OUTLOOK_REST = "https://outlook.office.com/api/v2.0";
 const MARGIN_S = 120;
@@ -95,19 +96,12 @@ export function accountsFrom(payload: unknown, nowS: number): Account[] {
 
 type Loader = () => Promise<unknown>;
 
-/** HTTP straight to the broker: https, or http on this machine only; no redirects, so the key goes nowhere else. */
+/** HTTP straight to the broker: https, or http on this machine or its container network only (url.ts); no redirects, so the key goes nowhere else. */
 export function httpLoader(url: string, key: string): Loader {
-  const u = new URL(url);
-  const local = ["127.0.0.1", "::1", "[::1]", "localhost"].includes(u.hostname);
-  if (
-    u.username ||
-    u.password ||
-    u.search ||
-    u.hash ||
-    !(u.protocol === "https:" || (u.protocol === "http:" && local))
-  ) {
+  const u = backendUrl(url);
+  if (!u) {
     throw new TokenError(
-      "OUTLOOK_MCP_BROKER_URL must be https, or http on localhost, without credentials or query",
+      "OUTLOOK_MCP_BROKER_URL must be https, or http on localhost or a container service name, without credentials or query",
     );
   }
   return async () => {
